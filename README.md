@@ -2,7 +2,7 @@
 
 ---
 ## 환경 설정
-* x64 + /std:c++17.\n
+* x64 + /std:c++17.
 * 빌드 전제: boost-asio, boost-beast, openssl, nlohmann-json 설치(vcpkg 권장).
 
 ```
