@@ -7,4 +7,5 @@
 
 ```
 vcpkg install boost-asio:x64-windows boost-beast:x64-windows openssl:x64-windows nlohmann-json:x64-windows
+vcpkg integrate install
 ```
