@@ -30,6 +30,7 @@
 #include "OrderBookEvent.h"
 #include "EventQueue.h"
 #include "LocalOrderBook.h"
+#include "QuestDbIlp.h"
 
 using json = nlohmann::json;
 using ordered_json = nlohmann::ordered_json;
@@ -102,6 +103,9 @@ static void store_worker(EventQueue& q,
     fs::create_directories("data");
     std::ofstream all(fs::path("data") / "orderbook_stream.jsonl", std::ios::app);
 
+    QuestDbIlpClient ilp("127.0.0.1", "9009");
+    ilp.set_batch(64 * 1024, 500);  // 선택: 배치 크기 조정
+
     std::unordered_map<std::string, std::unique_ptr<std::ofstream>> cache;
 
     while (running.load()) {
@@ -112,6 +116,44 @@ static void store_worker(EventQueue& q,
         auto key = ev.exchange + ":" + ev.symbol + ":" + ev.instance_id;
         if (!books.count(key)) books[key] = std::make_unique<LocalOrderBook>(ev.exchange, ev.symbol);
         books[key]->apply(ev);
+
+        // ===== ILP 라인 빌드 & 전송 =====
+        auto bids = books[key]->top_bids(1);
+        auto asks = books[key]->top_asks(1);
+
+        double bb = bids.empty() ? 0.0 : bids[0].first;
+        double bq = bids.empty() ? 0.0 : bids[0].second;
+        double ba = asks.empty() ? 0.0 : asks[0].first;
+        double aq = asks.empty() ? 0.0 : asks[0].second;
+
+        auto to_ns = [](double secs) -> long long {
+            return static_cast<long long>(secs * 1'000'000'000LL);
+            };
+
+        // measurement: orderbook
+        // tags: exchange, symbol, instance
+        // fields: seq, best_bid, best_ask, bid_qty, ask_qty
+        std::ostringstream ilp_line;
+        ilp_line << "orderbook"
+            << ",exchange=" << ev.exchange
+            << ",symbol=" << ev.symbol
+            << ",instance=" << ev.instance_id
+            << " seq=" << ev.seq << "i"
+            << ",best_bid=" << bb
+            << ",best_ask=" << ba
+            << ",bid_qty=" << bq
+            << ",ask_qty=" << aq
+            << " " << to_ns(ev.event_ts);
+
+        try {
+            ilp.append_line(ilp_line.str());   // 배치에 쌓음 (임계치 도달 시 자동 flush)
+        }
+        catch (const std::exception& e) {
+            // 네트워크 일시 장애 시 워커 멈추지 않도록 무시/로그
+            std::cerr << "[ilp] " << e.what() << "\n";
+        }
+
+
 
         // 보기 좋은 JSON
         auto j = to_json(ev, *books[key], json::object());
