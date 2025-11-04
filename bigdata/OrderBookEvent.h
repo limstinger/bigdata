@@ -1,20 +1,19 @@
-// OrderBookEvent.h
-#pragma once
-
+ï»¿#pragma once
 #include <string>
 #include <vector>
 #include <utility>
 #include <cstdint>
 
-// ====== °øÅë ÀÌº¥Æ® ======
 struct OrderBookEvent {
-    std::string exchange;   // "binance", "okx", "bybit"
-    std::string symbol;     // "BTC-USD", ...
-    std::string instance_id;// "A" / "B"  (ÀÎ½ºÅÏ½º ±¸ºĞ)
-    double      event_ts;   // exchange°¡ ÁØ ½Ã°¢ (sec)
-    double      recv_ts;    // ¿ì¸®°¡ ¹ŞÀº ½Ã°¢ (sec, system_clock)
-    std::uint64_t seq;      // exchange ½ÃÄö½º
+    std::string exchange;    // "binance" | "okx" | "bybit"
+    std::string symbol;      // "BTC-USD" | "ETH-USD" | "SOL-USD"
+    std::string instance_id; // "A" or "B"
 
+    double        event_ts = 0.0;  // ê±°ë˜ì†Œ ì´ë²¤íŠ¸ ì‹œê°(sec)  â˜…ë¡œê·¸ì—ëŠ” ì´ê²ƒë§Œ ê¸°ë¡
+    double        recv_ts = 0.0;  // ë¡œì»¬ ìˆ˜ì‹  ì‹œê°(sec)     (ë‚´ë¶€ìš©)
+    std::uint64_t seq = 0;    // ê±°ë˜ì†Œ ì œê³µ ì‹œí€€ìŠ¤/ë²„ì „
+
+    // price, qty
     std::vector<std::pair<double, double>> bids;
     std::vector<std::pair<double, double>> asks;
 };

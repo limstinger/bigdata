@@ -1,50 +1,43 @@
-#pragma once
-
-#include <iostream> 
-#include <string>
+ï»¿#pragma once
 #include <map>
+#include <mutex>
+#include <string>
 #include <vector>
 #include <utility>
-#include <functional>   // std::greater
+#include <functional>
 #include "OrderBookEvent.h"
 
-// ====== ·ÎÄÃ ¿À´õºÏ ======
-struct LocalOrderBook {
-    std::string exchange;
-    std::string symbol;
-    // price -> qty
-    std::map<double, double, std::greater<double>> bids; // ³»¸²Â÷¼ø
-    std::map<double, double> asks;                       // ¿À¸§Â÷¼ø
-    std::uint64_t last_seq = 0;
-
+// ì˜¤ë”ë¶(ìƒìœ„ N ì¶”ì¶œ, seq ì—­ì „ ë°©ì§€)
+class LocalOrderBook {
+public:
     LocalOrderBook() = default;
     LocalOrderBook(std::string ex, std::string sym)
         : exchange(std::move(ex)), symbol(std::move(sym)) {}
 
     void apply(const OrderBookEvent& ev) {
-        // ½ÃÄö½º Ã¼Å©
-        if (ev.seq && ev.seq < last_seq) {
-            // µÚ·Î °£ ÀÌº¥Æ®¸é ¹«½Ã
-            return;
-        }
-
-        // ¾ÆÁÖ ´Ü¼øÇÏ°Ô µ¤¾î¾²±â
-        for (auto& [p, q] : ev.bids) {
-            if (q == 0.0) bids.erase(p);
-            else bids[p] = q;
-        }
-        for (auto& [p, q] : ev.asks) {
-            if (q == 0.0) asks.erase(p);
-            else asks[p] = q;
-        }
+        std::lock_guard<std::mutex> lg(m_);
+        if (ev.seq && ev.seq < last_seq) return; // seq ì—­ì „ ë°©ì§€
+        for (auto& [p, q] : ev.bids) { if (q == 0) bids.erase(p); else bids[p] = q; }
+        for (auto& [p, q] : ev.asks) { if (q == 0) asks.erase(p); else asks[p] = q; }
         last_seq = ev.seq;
     }
 
-    void print_top1() const {
-        double best_bid = bids.empty() ? 0.0 : bids.begin()->first;
-        double best_ask = asks.empty() ? 0.0 : asks.begin()->first;
-        std::cout << "[" << exchange << ":" << symbol << "] "
-            << "bid=" << best_bid << " ask=" << best_ask
-            << " seq=" << last_seq << "\n";
+    std::vector<std::pair<double, double>> top_bids(int n = 20) const {
+        std::vector<std::pair<double, double>> v; int c = 0;
+        for (auto& kv : bids) { if (c++ >= n) break; v.push_back(kv); }
+        return v;
     }
+    std::vector<std::pair<double, double>> top_asks(int n = 20) const {
+        std::vector<std::pair<double, double>> v; int c = 0;
+        for (auto& kv : asks) { if (c++ >= n) break; v.push_back(kv); }
+        return v;
+    }
+
+    std::string exchange, symbol;
+    std::map<double, double, std::greater<double>> bids; // ë‚´ë¦¼ì°¨ìˆœ
+    std::map<double, double> asks;                      // ì˜¤ë¦„ì°¨ìˆœ
+    std::uint64_t last_seq = 0;
+
+private:
+    mutable std::mutex m_;
 };
