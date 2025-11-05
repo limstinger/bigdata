@@ -236,6 +236,36 @@ struct SymbolMaps {
     };
 };
 
+// --- [ADD] OKX용 단조 seq 합성 유틸 (키별: exchange:symbol:instance) ---
+struct MonoSeq {
+    uint64_t last_ms = 0;
+    uint16_t sub = 0;
+};
+static std::mutex g_seq_m;
+static std::unordered_map<std::string, MonoSeq> g_seq_reg;
+
+// ts_ms가 같아도 항상 증가하도록 하위 12비트 서브카운터 부여
+static uint64_t compose_monotonic_seq(const std::string& key, uint64_t ts_ms) {
+    std::lock_guard<std::mutex> lk(g_seq_m);
+    auto& s = g_seq_reg[key];
+    if (ts_ms < s.last_ms) {
+        // 네트워크 지터로 과거 프레임: 안전하게 드랍 신호(0) 리턴
+        return 0;
+    }
+    if (ts_ms == s.last_ms) {
+        if (++s.sub == 0) s.sub = 1; // (이론상) 오버플로 방지
+    }
+    else {
+        s.last_ms = ts_ms;
+        s.sub = 1;
+    }
+    return (ts_ms << 12) | s.sub; // 상위=ms, 하위=0..4095
+}
+
+
+
+
+
 // ========= 각 거래소 러너 =========
 static void run_binance(asio::io_context& io, ssl::context& tls, const std::string& inst,
     const std::map<std::string, std::string>& symmap, EventQueue& out) {
@@ -297,27 +327,45 @@ static void run_binance(asio::io_context& io, ssl::context& tls, const std::stri
     }
 }
 
+// === OKX 러너: seq 없으면 ts(ms)로 단조 증가 seq 합성 ===
 static void run_okx(asio::io_context& io, ssl::context& tls, const std::string& inst,
     const std::map<std::string, std::string>& symmap, EventQueue& out) {
+
+    // 안전한 ms 파서 (string/int/float 모두 처리)
+    auto parse_ms = [](const json& x) -> double {
+        try {
+            if (x.is_string())         return std::stod(x.get<std::string>());
+            if (x.is_number_integer()) return static_cast<double>(x.get<long long>());
+            if (x.is_number_float())   return x.get<double>();
+        }
+        catch (...) {}
+        return 0.0;
+        };
+
     while (running.load()) {
         try {
+            // 포트가 막혀 있으면 "443"으로 바꿔 테스트 가능
             WssClient c(io, tls, "ws.okx.com", "8443", "/ws/v5/public");
             c.open();
+
             ordered_json sub;
             sub["op"] = "subscribe"; sub["args"] = ordered_json::array();
             for (auto& kv : symmap) sub["args"].push_back({ {"channel","books5"},{"instId",kv.second} });
             c.send(sub.dump());
 
             for (;;) {
-                auto s = c.read_text();
-                double recv = now_sec();
+                const std::string s = c.read_text();
+                const double recv = now_sec();
+
                 auto j = json::parse(s, nullptr, false);
                 if (j.is_discarded() || !j.contains("arg") || !j.contains("data")) continue;
                 if (j["arg"].value("channel", "") != "books5") continue;
                 if (!j["data"].is_array() || j["data"].empty()) continue;
 
-                auto d = j["data"][0];
-                std::string venue = j["arg"].value("instId", "");
+                const auto d = j["data"][0];
+
+                // instId -> 우리 심볼 역매핑
+                const std::string venue = j["arg"].value("instId", "");
                 std::string unified;
                 for (auto& kv : symmap) if (kv.second == venue) { unified = kv.first; break; }
                 if (unified.empty()) continue;
@@ -327,21 +375,33 @@ static void run_okx(asio::io_context& io, ssl::context& tls, const std::string& 
                 ev.instance_id = inst;
                 ev.symbol = unified;
 
-                if (d.contains("ts")) {
-                    double ms = d["ts"].is_string() ? std::stod(d["ts"].get<std::string>())
-                        : d["ts"].get<double>();
-                    ev.event_ts = ms / 1000.0;
-                }
+                // --- event_ts: ts(ms) → sec ---
+                double ms = d.contains("ts") ? parse_ms(d["ts"]) : 0.0;
+                ev.event_ts = (ms > 0.0) ? (ms / 1000.0) : recv;
                 ev.recv_ts = recv;
 
-                if (d.contains("seq"))
-                    ev.seq = d["seq"].is_string() ? std::stoull(d["seq"].get<std::string>())
-                    : d["seq"].get<std::uint64_t>();
+                // --- seq: 원본 'seq'가 있으면 사용, 없으면 ts(ms) 기반 단조 seq 합성 ---
+                if (d.contains("seq")) {
+                    ev.seq = d["seq"].is_string()
+                        ? std::stoull(d["seq"].get<std::string>())
+                        : d["seq"].get<std::uint64_t>();
+                }
+                else {
+                    const std::string key = "okx:" + ev.symbol + ":" + ev.instance_id;
+                    const uint64_t ts_ms_u64 = (uint64_t)(ms > 0.0 ? ms : recv * 1000.0);
+                    ev.seq = compose_monotonic_seq(key, ts_ms_u64);
+                    if (ev.seq == 0) continue; // 과거 프레임은 안전하게 드랍
+                }
 
-                if (d.contains("bids")) for (auto& x : d["bids"]) if (x.size() >= 2)
-                    ev.bids.emplace_back(std::stod(x[0].get<std::string>()), std::stod(x[1].get<std::string>()));
-                if (d.contains("asks")) for (auto& x : d["asks"]) if (x.size() >= 2)
-                    ev.asks.emplace_back(std::stod(x[0].get<std::string>()), std::stod(x[1].get<std::string>()));
+                // --- depth ---
+                if (d.contains("bids"))
+                    for (const auto& x : d["bids"]) if (x.size() >= 2)
+                        ev.bids.emplace_back(std::stod(x[0].get<std::string>()),
+                            std::stod(x[1].get<std::string>()));
+                if (d.contains("asks"))
+                    for (const auto& x : d["asks"]) if (x.size() >= 2)
+                        ev.asks.emplace_back(std::stod(x[0].get<std::string>()),
+                            std::stod(x[1].get<std::string>()));
 
                 out.push(std::move(ev));
             }
